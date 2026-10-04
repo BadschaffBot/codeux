@@ -11,7 +11,7 @@ export interface RuntimeProcessLockRecord {
 export interface RuntimeProcessLockOptions {
   lockPath?: string;
   projectRoot: string;
-  isProcessAlive?: (pid: number) => boolean;
+  isProcessAlive?: (pid: number) => boolean | Promise<boolean>;
   acquireTimeoutMs?: number;
   retryIntervalMs?: number;
 }
@@ -75,7 +75,7 @@ export async function acquireRuntimeProcessLock(
     if (existing?.pid === process.pid) {
       return async () => undefined;
     }
-    if (existing?.pid && isProcessAlive(existing.pid)) {
+    if (existing?.pid && await isProcessAlive(existing.pid)) {
       if (Date.now() < deadline) {
         await sleep(Math.min(retryIntervalMs, Math.max(1, deadline - Date.now())));
         continue;
@@ -115,13 +115,29 @@ async function readLockRecord(lockPath: string): Promise<RuntimeProcessLockRecor
   }
 }
 
-function defaultIsProcessAlive(pid: number): boolean {
+async function defaultIsProcessAlive(pid: number): Promise<boolean> {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return code === "EPERM";
+  }
+
+  // On Linux, kill(pid, 0) also accepts a task/thread ID. If a runtime exits
+  // and its PID is later reused by a worker thread in an unrelated process,
+  // treating that thread as the lock owner strands the runtime forever.
+  if (process.platform !== "linux") {
+    return true;
+  }
+
+  try {
+    const status = await fs.readFile(`/proc/${pid}/status`, "utf8");
+    const processId = status.match(/^Pid:\s*(\d+)$/m)?.[1];
+    const threadGroupId = status.match(/^Tgid:\s*(\d+)$/m)?.[1];
+    return Number(processId) === pid && Number(threadGroupId) === pid;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code !== "ENOENT" && code !== "ESRCH";
   }
 }
 

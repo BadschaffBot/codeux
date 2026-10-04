@@ -110,6 +110,36 @@ describe("runtime process lock", () => {
     await release();
   });
 
+  it("does not treat a reused Linux worker-thread id as a live runtime pid", async () => {
+    if (process.platform !== "linux") {
+      return;
+    }
+
+    const taskIds = await fs.readdir("/proc/self/task");
+    const workerThreadId = taskIds.map(Number).find((pid) => pid !== process.pid);
+    if (!workerThreadId) {
+      return;
+    }
+
+    const lockPath = await createLockPath();
+    await fs.mkdir(path.dirname(lockPath), { recursive: true });
+    await fs.writeFile(lockPath, JSON.stringify({
+      pid: workerThreadId,
+      projectRoot: "/tmp/old-runtime",
+      startedAt: "2026-07-05T00:00:00.000Z",
+    }));
+
+    const release = await acquireRuntimeProcessLock({
+      lockPath,
+      projectRoot: process.cwd(),
+      acquireTimeoutMs: 0,
+    });
+
+    const raw = await fs.readFile(lockPath, "utf8");
+    expect(JSON.parse(raw).pid).toBe(process.pid);
+    await release();
+  });
+
   it("replaces a malformed stale lock", async () => {
     const lockPath = await createLockPath();
     await fs.mkdir(path.dirname(lockPath), { recursive: true });

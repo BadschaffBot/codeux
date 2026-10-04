@@ -833,7 +833,11 @@ export async function bootDashboard(deps: BootDashboardDeps): Promise<DashboardS
     createSprintRollback: (projectId, sprintId, input) => deps.sprintRollbackService.create(projectId, sprintId, input),
     importSprintFromMarkdown: (projectId, input) => deps.sprintMarkdownService.importSprint(projectId, input),
     exportSprintToMarkdown: (projectId, sprintId) => deps.sprintMarkdownService.exportSprint(projectId, sprintId),
-    listTasks: (projectId, sprintId) => deps.projectManagementRepository.listTasks(projectId, sprintId),
+    listTasks: (projectId, sprintId) => {
+      const tasks = deps.projectManagementRepository.listTasks(projectId, sprintId);
+      const latestRuns = deps.executionRepository.listLatestTaskRuns(tasks.map((task) => task.id));
+      return tasks.map((task) => ({ ...task, executionStatus: latestRuns.get(task.id)?.state ?? null }));
+    },
     listTaskOverviews: (projectId) => deps.projectManagementRepository.listTaskOverviews(projectId),
     getTask: (taskId) => deps.projectManagementRepository.getTask(taskId),
     createTask: (projectId, input) => deps.projectManagementRepository.createTask(projectId, input),
