@@ -27,6 +27,61 @@ function candidate(projectId: string) {
 }
 
 describe("GithubIntakeRepository", () => {
+  it.each(["claimed", "dispatched", "held", "failed", "completed", "ignored"] as const)(
+    "refuses changed observations of a stable issue already %s, even at capacity",
+    (status) => {
+      const { repo, projectId } = setup();
+      repo.upsertSeen({ ...candidate(projectId), status });
+      const next = repo.upsertSeen({ ...candidate(projectId), observedVersion: "later" });
+      expect(repo.claimWithinCapacity(next.id, projectId, "org/repo", 0)).toEqual({ status: "unavailable" });
+      expect(repo.claimWithinCapacity(next.id, projectId, "org/repo", 10)).toEqual({ status: "unavailable" });
+      expect(repo.getByKey(next.idempotencyKey)?.status).toBe("seen");
+    },
+  );
+
+  it.each([
+    { observedVersion: "later" },
+    { policyVersion: "intake-v2" },
+    { observedVersion: "later", policyVersion: "intake-v2" },
+    { repository: "ORG/REPO" },
+  ])("refuses a completed stable issue with identity-neutral changes %j", (change) => {
+    const { repo, projectId } = setup();
+    repo.upsertSeen({ ...candidate(projectId), status: "completed" });
+    const next = repo.upsertSeen({ ...candidate(projectId), ...change });
+    expect(repo.claimWithinCapacity(next.id, projectId, next.repository, 10)).toEqual({ status: "unavailable" });
+  });
+
+  it("refuses the same stable issue across projects", () => {
+    const { storage, repo, projectId } = setup();
+    storage.getDatabase().prepare(`INSERT INTO projects (id, slug, name, base_dir, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run("other-project", "other-project", "Other Project", ".", "2026-01-01", "2026-01-01");
+    repo.upsertSeen({ ...candidate(projectId), status: "held" });
+    const next = repo.upsertSeen({ ...candidate("other-project"), observedVersion: "later" });
+    expect(repo.claimWithinCapacity(next.id, "other-project", "org/repo", 10)).toEqual({ status: "unavailable" });
+  });
+
+  it("allows another observation when the previous issue was only seen", () => {
+    const { repo, projectId } = setup();
+    repo.upsertSeen(candidate(projectId));
+    const next = repo.upsertSeen({ ...candidate(projectId), observedVersion: "later" });
+    expect(repo.claimWithinCapacity(next.id, projectId, "org/repo", 10).status).toBe("claimed");
+    expect(repo.claimWithinCapacity(next.id, projectId, "org/repo", 10)).toEqual({ status: "unavailable" });
+  });
+
+  it.each([
+    { externalNumber: 8 },
+    { repository: "org/other" },
+    { actionClass: "repair" as const },
+    { provider: "other" },
+    { hostDomain: "other.example" },
+    { externalKind: "pull_request" as const },
+  ])("allows a distinct stable identity %j", (change) => {
+    const { repo, projectId } = setup();
+    repo.upsertSeen({ ...candidate(projectId), status: "completed" });
+    const next = repo.upsertSeen({ ...candidate(projectId), ...change });
+    expect(repo.claimWithinCapacity(next.id, projectId, next.repository, 10).status).toBe("claimed");
+  });
+
   it("upserts an unchanged observation under one readable idempotency key", () => {
     const { repo, projectId } = setup();
     const first = repo.upsertSeen(candidate(projectId));
