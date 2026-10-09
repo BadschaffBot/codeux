@@ -72,6 +72,16 @@ export class GithubIntakeRepository {
     now = new Date().toISOString(),
   ): GithubIntakeCapacityClaimResult {
     return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM github_intake_items WHERE id = ?").get(id) as IntakeRow | undefined;
+      if (!row) return { status: "unavailable" };
+      const existing = this.db.prepare(`SELECT id FROM github_intake_items
+        WHERE provider = ? AND LOWER(host_domain) = LOWER(?)
+          AND LOWER(repository) = LOWER(?)
+          AND external_kind = ? AND external_number = ? AND action_class = ?
+          AND status IN ('claimed', 'dispatched', 'held', 'failed', 'completed', 'ignored')
+          AND id != ?`)
+        .get(row.provider, row.host_domain, row.repository, row.external_kind, row.external_number, row.action_class, id) as { id: string } | undefined;
+      if (existing) return { status: "unavailable" };
       const active = this.db.prepare(`SELECT COUNT(*) AS count FROM github_intake_items
         WHERE project_id = ? AND repository = ? AND status IN ('claimed', 'dispatched')`)
         .get(projectId, repository) as { count: number };
@@ -81,8 +91,8 @@ export class GithubIntakeRepository {
           AND (next_wake_at IS NULL OR next_wake_at <= ?) AND sprint_id IS NULL AND dispatch_id IS NULL`)
         .run(now, now, id, projectId, repository, now);
       if (result.changes === 0) return { status: "unavailable" };
-      const row = this.db.prepare("SELECT * FROM github_intake_items WHERE id = ?").get(id) as IntakeRow | undefined;
-      return row ? { status: "claimed", item: this.map(row) } : { status: "unavailable" };
+      const updatedRow = this.db.prepare("SELECT * FROM github_intake_items WHERE id = ?").get(id) as IntakeRow | undefined;
+      return updatedRow ? { status: "claimed", item: this.map(updatedRow) } : { status: "unavailable" };
     });
   }
 

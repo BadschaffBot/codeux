@@ -44,6 +44,7 @@ describe("GithubIntakeRepository", () => {
     { policyVersion: "intake-v2" },
     { observedVersion: "later", policyVersion: "intake-v2" },
     { repository: "ORG/REPO" },
+    { hostDomain: "GITHUB.COM" },
   ])("refuses a completed stable issue with identity-neutral changes %j", (change) => {
     const { repo, projectId } = setup();
     repo.upsertSeen({ ...candidate(projectId), status: "completed" });
