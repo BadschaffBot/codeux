@@ -16,11 +16,13 @@ import type { ChatThreadRuntimeService } from "./chat-thread-runtime-service.js"
 import type { ExecutionControlService } from "./execution-control-service.js";
 import type { MemoryRemediationService } from "./memory-remediation-service.js";
 import type { TaskRerunService } from "./task-rerun-service.js";
-import type { NodeFlowRuntimeService } from "./node-flow-runtime-service.js";
+import { NodeFlowAdmissionDeferredError, type NodeFlowRuntimeService } from "./node-flow-runtime-service.js";
 import type { NodeFlowRepository } from "../repositories/node-flow-repository.js";
 import type { NodeFlowRunSummaryResponse } from "../contracts/node-flow-types.js";
 import { buildSchedulerOccurrences, computeNextRunAfterOccurrence } from "../domain/scheduler/schedule-time.js";
 import type { ConversationMessageMetadata, CreateDashboardConversationMessageInput } from "../contracts/connection-chat-types.js";
+
+const RECURRING_INTAKE_FAILURE_COOLDOWN_MS = 60 * 60_000;
 
 export interface SchedulerServiceDeps {
   schedulerRepository: SchedulerRepository;
@@ -235,16 +237,28 @@ export class SchedulerService {
 
         this.executeNodeFlowEntry(claimedEntry, occurrenceIso).then((result) => {
           if (result.run.status === "succeeded") {
-            this.deps.schedulerRepository.markRunSucceeded(claimedEntry.id, occurrenceIso, nextRunAt);
+            const futureNextRunAt = this.isRecurringGithubIssueIntake(claimedEntry)
+              ? this.computeFutureOccurrence(claimedEntry, occurrenceIso, new Date(Date.now() + 1).toISOString())
+              : nextRunAt;
+            this.deps.schedulerRepository.markRunSucceeded(claimedEntry.id, occurrenceIso, futureNextRunAt, claimedEntry.updatedAt);
+            return;
+          }
+          if (this.shouldDeferRecurringIntakeFailure(claimedEntry, result)) {
+            this.deferRecurringIntake(claimedEntry, occurrenceIso, result.run.errorMessage ?? `Node flow run ${result.run.status}.`);
             return;
           }
           this.deps.schedulerRepository.markRunFailed(
             claimedEntry.id,
             result.run.errorMessage ?? `Node flow run ${result.run.status}.`,
             occurrenceIso,
+            claimedEntry.updatedAt,
           );
         }).catch((error) => {
-          this.handleExecutionFailure(claimedEntry, error);
+          if (error instanceof NodeFlowAdmissionDeferredError && this.isRecurringGithubIssueIntake(claimedEntry)) {
+            this.deferRecurringIntake(claimedEntry, occurrenceIso, error.message);
+          } else {
+            this.handleExecutionFailure(claimedEntry, error, occurrenceIso, claimedEntry.updatedAt);
+          }
         }).finally(() => {
           this.inFlightEntryIds.delete(entry.id);
         });
@@ -262,7 +276,7 @@ export class SchedulerService {
     }
   }
 
-  private handleExecutionFailure(entry: SchedulerEntryRecord, error: unknown): void {
+  private handleExecutionFailure(entry: SchedulerEntryRecord, error: unknown, occurrenceIso?: string, expectedUpdatedAt?: string): void {
     const message = error instanceof Error ? error.message : String(error);
     this.deps.logger.error("Scheduled entry execution failed", {
       entryId: entry.id,
@@ -270,7 +284,61 @@ export class SchedulerService {
       targetType: entry.targetType,
       error: message,
     });
-    this.deps.schedulerRepository.markRunFailed(entry.id, message);
+    if (occurrenceIso === undefined && expectedUpdatedAt === undefined) {
+      this.deps.schedulerRepository.markRunFailed(entry.id, message);
+    } else {
+      this.deps.schedulerRepository.markRunFailed(entry.id, message, occurrenceIso, expectedUpdatedAt);
+    }
+  }
+
+  private shouldDeferRecurringIntakeFailure(entry: SchedulerEntryRecord, result: NodeFlowRunSummaryResponse): boolean {
+    if (result.run.status !== "failed" || !this.isRecurringGithubIssueIntake(entry)) {
+      return false;
+    }
+    const attempts = result.attempts ?? [];
+    return attempts.length > 0
+      && attempts.every((attempt) => attempt.failureClassification === "quota"
+        || attempt.failureClassification === "transient"
+        || attempt.failureClassification === "timeout");
+  }
+
+  private isRecurringGithubIssueIntake(entry: SchedulerEntryRecord): boolean {
+    if (entry.recurrence.frequency === "none" || entry.targetType !== "node_flow" || !entry.nodeFlowTarget) {
+      return false;
+    }
+    const selection = entry.nodeFlowTarget.versionSelection
+      ?? (entry.nodeFlowTarget.flowVersion !== undefined
+        ? { mode: "pinned" as const, version: entry.nodeFlowTarget.flowVersion }
+        : { mode: "latest_published" as const });
+    const publication = this.deps.nodeFlowRepository?.getPublication(
+      entry.nodeFlowTarget.flowId,
+      selection.mode === "pinned" ? selection.version : undefined,
+    );
+    return publication?.graph.nodes.length === 1
+      && publication.graph.nodes[0]?.type === "github_issue_intake"
+      && publication.graph.edges.length === 0;
+  }
+
+  private deferRecurringIntake(entry: SchedulerEntryRecord, occurrenceIso: string, error: string): void {
+    const eligibleAfter = new Date(Date.now() + RECURRING_INTAKE_FAILURE_COOLDOWN_MS).toISOString();
+    const nextRunAt = this.computeFutureOccurrence(entry, occurrenceIso, eligibleAfter);
+    if (!nextRunAt) {
+      this.deps.schedulerRepository.markRunFailed(entry.id, error, occurrenceIso, entry.updatedAt);
+      return;
+    }
+    this.deps.schedulerRepository.markRunDeferred(entry.id, error, occurrenceIso, nextRunAt, entry.updatedAt);
+  }
+
+  private computeFutureOccurrence(entry: SchedulerEntryRecord, occurrenceIso: string, notBeforeIso: string): string | null {
+    const notBefore = new Date(notBeforeIso).getTime();
+    let nextRunAt = computeNextRunAfterOccurrence(occurrenceIso, entry.recurrence, entry.runCount + 1);
+    for (let skipped = 0; nextRunAt && new Date(nextRunAt).getTime() < notBefore && skipped < 10_000; skipped += 1) {
+      nextRunAt = computeNextRunAfterOccurrence(nextRunAt, entry.recurrence, entry.runCount + 1);
+    }
+    if (nextRunAt && new Date(nextRunAt).getTime() < notBefore) {
+      return null;
+    }
+    return nextRunAt;
   }
 
   private claimDueOccurrence(

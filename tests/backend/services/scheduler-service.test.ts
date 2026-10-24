@@ -8,6 +8,7 @@ import type { SchedulerEntryRecord } from "../../../src/contracts/scheduler-type
 import { AppDbStorage } from "../../../src/repositories/app-db-storage.js";
 import { ProjectManagementRepository } from "../../../src/repositories/project-management-repository.js";
 import { SchedulerRepository } from "../../../src/repositories/scheduler-repository.js";
+import { NodeFlowRepository } from "../../../src/repositories/node-flow-repository.js";
 
 const tempDirs: string[] = [];
 
@@ -642,7 +643,12 @@ describe("SchedulerService", () => {
         flowVersion: 2,
       },
     });
-    expect(repo.markRunSucceeded).toHaveBeenCalledWith("entry-1", "2026-05-18T09:00:00.000Z", null);
+    expect(repo.markRunSucceeded).toHaveBeenCalledWith(
+      "entry-1",
+      "2026-05-18T09:00:00.000Z",
+      null,
+      "2026-05-18T08:00:00.000Z",
+    );
   });
 
   it("durably claims a due node flow occurrence before a long-running runtime resolves", async () => {
@@ -700,6 +706,61 @@ describe("SchedulerService", () => {
     expect(finalized?.runCount).toBe(1);
   });
 
+  it("recovers a transient recurring intake across restart and runs later occurrences once", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-18T09:00:01.000Z"));
+    try {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "scheduler-recovery-"));
+      tempDirs.push(dir);
+      const storage = new AppDbStorage(path.join(dir, "app.db"));
+      const projectManagementRepository = new ProjectManagementRepository(storage);
+      const schedulerRepository = new SchedulerRepository(storage);
+      const nodeFlowRepository = new NodeFlowRepository(storage);
+      const project = projectManagementRepository.createProject({ name: "Intake recovery", sourceType: "local", sourceRef: dir });
+      const flow = nodeFlowRepository.createFlow(project.id, { title: "Issue intake", graph: {
+        nodes: [{ id: "github-intake", type: "github_issue_intake", title: "GitHub issue intake" }], edges: [],
+      } });
+      const entry = schedulerRepository.createEntry(project.id, {
+        targetType: "node_flow", scheduledFor: "2026-05-18T09:00:00.000Z",
+        recurrence: { frequency: "hourly", interval: 1, endMode: "never" }, nodeFlowTarget: { flowId: flow.id },
+      });
+      const failedRuntime = { runFlow: vi.fn().mockResolvedValue({
+        run: { status: "failed", errorMessage: "403 Forbidden: You have exceeded a secondary rate limit." },
+        nodeRuns: [], attempts: [{ failureClassification: "quota" }], output: {},
+      }) };
+      const firstProcess = buildService(schedulerRepository, {
+        projectManagementRepository, nodeFlowRuntimeService: failedRuntime, nodeFlowRepository,
+      });
+
+      await firstProcess.runDueEntries(new Date());
+      await vi.runAllTimersAsync();
+
+      expect(schedulerRepository.getEntry(entry.id)).toMatchObject({
+        status: "scheduled", runCount: 1, nextRunAt: "2026-05-18T11:00:00.000Z",
+        lastError: "403 Forbidden: You have exceeded a secondary rate limit.",
+      });
+      expect(schedulerRepository.listDueEntries("2026-05-18T10:59:59.999Z")).toHaveLength(0);
+
+      const successfulRuntime = { runFlow: vi.fn().mockResolvedValue({ run: { status: "succeeded" }, nodeRuns: [], attempts: [], output: {} }) };
+      const restartedProcess = buildService(schedulerRepository, {
+        projectManagementRepository, nodeFlowRuntimeService: successfulRuntime, nodeFlowRepository,
+      });
+      vi.setSystemTime(new Date("2026-05-18T11:00:01.000Z"));
+      await restartedProcess.runDueEntries(new Date());
+      await vi.runAllTimersAsync();
+      vi.setSystemTime(new Date("2026-05-18T12:00:01.000Z"));
+      await restartedProcess.runDueEntries(new Date());
+      await vi.runAllTimersAsync();
+
+      expect(successfulRuntime.runFlow).toHaveBeenCalledTimes(2);
+      expect(schedulerRepository.getEntry(entry.id)).toMatchObject({
+        status: "scheduled", runCount: 3, nextRunAt: "2026-05-18T13:00:00.000Z", lastError: null,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks node flow schedules failed when the runtime resolves a failed run", async () => {
     const entry = createEntry({
       targetType: "node_flow",
@@ -732,7 +793,127 @@ describe("SchedulerService", () => {
       "entry-1",
       "node execution failed",
       "2026-05-18T09:00:00.000Z",
+      "2026-05-18T08:00:00.000Z",
     );
+  });
+
+  it.each([
+    ["quota", "403 Forbidden: You have exceeded a secondary rate limit."],
+    ["transient", "GitHub is temporarily unavailable (503)."],
+    ["timeout", "GitHub issue search timed out."],
+  ] as const)("keeps recurring GitHub intake scheduled after an explicit %s failure", async (failureClassification, errorMessage) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-18T09:00:01.000Z"));
+    try {
+      const entry = createEntry({
+        targetType: "node_flow", sprintTarget: undefined, nodeFlowTarget: { flowId: "flow-1" },
+        recurrence: normalizeRecurrenceRule({ frequency: "hourly", interval: 1, endMode: "never" }),
+      });
+      const repo = {
+        listDueEntries: vi.fn(() => [entry]), getEntry: vi.fn(() => entry), claimDueOccurrence: vi.fn(() => entry),
+        markRunSucceeded: vi.fn(), markRunFailed: vi.fn(), markRunDeferred: vi.fn(),
+      };
+      const service = buildService(repo, {
+        nodeFlowRuntimeService: { runFlow: vi.fn().mockResolvedValue({
+          run: { status: "failed", errorMessage }, nodeRuns: [], attempts: [{ failureClassification }], output: {},
+        }) },
+        nodeFlowRepository: {
+          getFlow: vi.fn(() => ({ id: "flow-1", projectId: "project-1" })),
+          getPublication: vi.fn(() => ({ graph: { nodes: [{ id: "github-intake", type: "github_issue_intake" }], edges: [] } })),
+        },
+      });
+
+      await service.runDueEntries(new Date());
+      await vi.runAllTimersAsync();
+
+      expect(repo.markRunDeferred).toHaveBeenCalledWith(entry.id, errorMessage, entry.nextRunAt, "2026-05-18T11:00:00.000Z", entry.updatedAt);
+      expect(repo.markRunFailed).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an ordinary 403 permanent for recurring GitHub intake", async () => {
+    const entry = createEntry({
+      targetType: "node_flow", sprintTarget: undefined, nodeFlowTarget: { flowId: "flow-1" },
+      recurrence: normalizeRecurrenceRule({ frequency: "hourly", interval: 1, endMode: "never" }),
+    });
+    const repo = {
+      listDueEntries: vi.fn(() => [entry]), getEntry: vi.fn(() => entry), claimDueOccurrence: vi.fn(() => entry),
+      markRunSucceeded: vi.fn(), markRunFailed: vi.fn(), markRunDeferred: vi.fn(),
+    };
+    const service = buildService(repo, {
+      nodeFlowRuntimeService: { runFlow: vi.fn().mockResolvedValue({
+        run: { status: "failed", errorMessage: "403 Forbidden" }, nodeRuns: [],
+        attempts: [{ failureClassification: "permanent" }], output: {},
+      }) },
+      nodeFlowRepository: {
+        getFlow: vi.fn(() => ({ id: "flow-1", projectId: "project-1" })),
+        getPublication: vi.fn(() => ({ graph: { nodes: [{ id: "github-intake", type: "github_issue_intake" }], edges: [] } })),
+      },
+    });
+
+    await service.runDueEntries(new Date("2026-05-18T09:00:01.000Z"));
+    await flush();
+
+    expect(repo.markRunDeferred).not.toHaveBeenCalled();
+    expect(repo.markRunFailed).toHaveBeenCalledWith(entry.id, "403 Forbidden", entry.nextRunAt, entry.updatedAt);
+  });
+
+  it("does not defer when any intake attempt has an unclassified outcome", async () => {
+    const entry = createEntry({
+      targetType: "node_flow", sprintTarget: undefined, nodeFlowTarget: { flowId: "flow-1" },
+      recurrence: normalizeRecurrenceRule({ frequency: "hourly", interval: 1, endMode: "never" }),
+    });
+    const repo = {
+      listDueEntries: vi.fn(() => [entry]), getEntry: vi.fn(() => entry), claimDueOccurrence: vi.fn(() => entry),
+      markRunSucceeded: vi.fn(), markRunFailed: vi.fn(), markRunDeferred: vi.fn(),
+    };
+    const service = buildService(repo, {
+      nodeFlowRuntimeService: { runFlow: vi.fn().mockResolvedValue({
+        run: { status: "failed", errorMessage: "mixed outcome" }, nodeRuns: [],
+        attempts: [{ failureClassification: "quota" }, { failureClassification: null }], output: {},
+      }) },
+      nodeFlowRepository: {
+        getFlow: vi.fn(() => ({ id: "flow-1", projectId: "project-1" })),
+        getPublication: vi.fn(() => ({ graph: { nodes: [{ id: "github-intake", type: "github_issue_intake" }], edges: [] } })),
+      },
+    });
+
+    await service.runDueEntries(new Date("2026-05-18T09:00:01.000Z"));
+    await flush();
+
+    expect(repo.markRunDeferred).not.toHaveBeenCalled();
+    expect(repo.markRunFailed).toHaveBeenCalled();
+  });
+
+  it("skips stale intake occurrences after success without consuming a finite recurrence count", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-21T09:00:01.000Z"));
+    try {
+      const entry = createEntry({
+        targetType: "node_flow", sprintTarget: undefined, nodeFlowTarget: { flowId: "flow-1" },
+        recurrence: normalizeRecurrenceRule({ frequency: "hourly", interval: 1, endMode: "after_count", count: 2 }),
+      });
+      const repo = {
+        listDueEntries: vi.fn(() => [entry]), getEntry: vi.fn(() => entry), claimDueOccurrence: vi.fn(() => entry),
+        markRunSucceeded: vi.fn(), markRunFailed: vi.fn(),
+      };
+      const service = buildService(repo, {
+        nodeFlowRuntimeService: { runFlow: vi.fn().mockResolvedValue({ run: { status: "succeeded" }, nodeRuns: [], attempts: [], output: {} }) },
+        nodeFlowRepository: {
+          getFlow: vi.fn(() => ({ id: "flow-1", projectId: "project-1" })),
+          getPublication: vi.fn(() => ({ graph: { nodes: [{ id: "github-intake", type: "github_issue_intake" }], edges: [] } })),
+        },
+      });
+
+      await service.runDueEntries(new Date());
+      await vi.runAllTimersAsync();
+
+      expect(repo.markRunSucceeded).toHaveBeenCalledWith(entry.id, entry.nextRunAt, "2026-05-21T10:00:00.000Z", entry.updatedAt);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not execute node flow targets before nextRunAt is due", async () => {
@@ -784,7 +965,7 @@ describe("SchedulerService", () => {
     await flush();
 
     expect(repo.markRunSucceeded).not.toHaveBeenCalled();
-    expect(repo.markRunFailed).toHaveBeenCalledWith("entry-1", "flow unavailable");
+    expect(repo.markRunFailed).toHaveBeenCalledWith("entry-1", "flow unavailable", "2026-05-18T09:00:00.000Z", "2026-05-18T08:00:00.000Z");
   });
 
   it("validates node flow targets on create and update against the owning project", () => {

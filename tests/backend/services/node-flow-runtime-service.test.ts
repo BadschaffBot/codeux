@@ -63,6 +63,49 @@ afterEach(async () => {
 });
 
 describe("NodeFlowRuntimeService", () => {
+  it("terminalizes only its own zero-attempt run when admission quota rejects", async () => {
+    const setup = await createRuntime();
+    const project = setup.projectRepository.createProject({ name: "Admission quota", sourceType: "local", sourceRef: setup.dir });
+    const flow = setup.nodeFlowRepository.createFlow(project.id, { title: "Admission quota", graph: {
+      nodes: [{ id: "input", type: "input", title: "Input" }], edges: [],
+    } });
+    for (let blocker = 0; blocker < 2; blocker += 1) {
+      setup.nodeFlowRepository.createRun({ flowId: flow.id, projectId: project.id, version: 1, status: "running" });
+    }
+
+    await expect(setup.runtime.runFlow(project.id, flow.id, {})).rejects.toThrow("Node flow concurrency quota is exhausted.");
+
+    const rejected = setup.nodeFlowRepository.listRuns(flow.id).find((run) => run.triggerType === "manual" && run.status === "failed");
+    expect(rejected).toMatchObject({ startedAt: null, leaseOwner: null, heartbeatAt: null });
+    expect(setup.nodeFlowRepository.listNodeRuns(rejected!.id)).toHaveLength(0);
+    expect(setup.nodeFlowRepository.listNodeAttempts(rejected!.id)).toHaveLength(0);
+    expect(setup.executionRepository.getExecutionInvocation(rejected!.executionInvocationId!)).toMatchObject({
+      status: "failed", errorMessage: "Node flow concurrency quota is exhausted.",
+    });
+  });
+
+  it("classifies an observed GitHub secondary-rate-limit 403 as quota but a generic 403 as permanent", async () => {
+    const observed = "403 Forbidden: { \\\"documentation_url\\\": \\\"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits\\\", \\\"message\\\": \\\"You have exceeded a secondary rate limit. Please wait a few minutes.\\\" }";
+    for (const [message, expected] of [[observed, "quota"], ["403 Forbidden", "permanent"]] as const) {
+      const providerExecutionService = {
+        executeProvider: vi.fn().mockResolvedValue({
+          ok: false, stdout: "", stderr: message, code: 1, text: null, nativeSessionId: null,
+          usageTelemetry: { transcriptText: "", inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, usageSource: "reported", rawUsageJson: null },
+        }),
+      };
+      const setup = await createRuntime(providerExecutionService as Partial<ProviderExecutionService>);
+      const project = setup.projectRepository.createProject({ name: `403 ${expected}`, sourceType: "local", sourceRef: setup.dir });
+      const flow = setup.nodeFlowRepository.createFlow(project.id, { title: `403 ${expected}`, graph: {
+        nodes: [{ id: "prompt", type: "provider_prompt", title: "Prompt", data: { provider: "mockup-cli", prompt: "Check" } }], edges: [],
+      } });
+
+      const result = await setup.runtime.runFlow(project.id, flow.id, {});
+
+      expect(result.run.status).toBe("failed");
+      expect(result.attempts?.[0]?.failureClassification).toBe(expected);
+    }
+  });
+
   it("resumes an approval-gated email send on the pinned run exactly once across restart and repeated decisions", async () => {
     const firstProvider = new MockSideEffectProvider();
     const setup = await createRuntime(undefined, undefined, undefined, firstProvider);

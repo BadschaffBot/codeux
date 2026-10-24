@@ -28,6 +28,22 @@ describe("NodeFlowRecoveryService", () => {
     expect(repository.getRun(run.id)?.status).toBe("queued");
   });
 
+  it("refuses to terminalize a queued run after another executor claims it", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-claim-race-")); dirs.push(dir);
+    const storage = new AppDbStorage(path.join(dir, "app.db"));
+    const projects = new ProjectManagementRepository(storage); const repository = new NodeFlowRepository(storage);
+    const project = projects.createProject({ name: "Claim race", sourceType: "local", sourceRef: dir });
+    const flow = repository.createFlow(project.id, { title: "Claim race", graph: { nodes: [{ id: "input", type: "input", title: "Input" }], edges: [] } });
+    const run = repository.createRun({ flowId: flow.id, projectId: project.id, version: 1, status: "queued", startedAt: null });
+
+    const claimed = repository.claimQueuedRun(run.id, "other-executor", run.policy.leaseDurationMs);
+    const terminalized = repository.terminalizeUnclaimedRun(run.id, "admission rejected");
+
+    expect(claimed?.status).toBe("running");
+    expect(terminalized).toBeNull();
+    expect(repository.getRun(run.id)).toMatchObject({ status: "running", leaseOwner: "other-executor" });
+  });
+
   it("requeues an expired pre-invocation attempt without creating a duplicate attempt", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-recovery-")); dirs.push(dir);
     const storage = new AppDbStorage(path.join(dir, "app.db"));

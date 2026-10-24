@@ -94,6 +94,8 @@ again. Node-flow schedules are then finalized from the returned run status: `suc
 completes the schedule, while returned `failed` or `cancelled` runs move the entry to `failed`,
 record the attempted occurrence, and show the run error in the list.
 
+Recurring published flows containing exactly one GitHub issue-intake node recover narrowly from transient intake failures. A pre-claim concurrency rejection or a run classified only as quota, transient, or timeout keeps the schedule active, shows the latest error, and advances directly to the first occurrence at least one hour in the future instead of replaying missed occurrences. Each new occurrence retains its normal attempt limit. Permission failures, ordinary HTTP 403 responses, validation or credential failures, approval waits, cancellations, and unknown side-effect outcomes still stop the schedule. Pausing or editing a schedule while its run is in flight takes precedence over late completion.
+
 ## Managing entries
 
 From the page you can:

@@ -384,7 +384,7 @@ export class NodeFlowRepository {
       input.input ? this.serializeJson(input.input) : null,
       input.output ? this.serializeJson(input.output) : null,
       input.errorMessage ?? null,
-      input.startedAt ?? now,
+      input.startedAt === undefined ? now : input.startedAt,
       input.finishedAt ?? null,
       now,
       now,
@@ -420,6 +420,45 @@ export class NodeFlowRepository {
       runId,
     );
     return requireRecord(this.getRun(runId), "Node flow run", runId);
+  }
+
+  terminalizeUnclaimedRun(
+    runId: string,
+    errorMessage: string,
+    onTerminalized?: (run: NodeFlowRunRecord) => void,
+  ): NodeFlowRunRecord | null {
+    return this.db.transaction(() => {
+      const now = new Date().toISOString();
+      const result = this.db.prepare(`
+      UPDATE node_flow_runs
+      SET status = 'failed', error_message = ?, finished_at = ?, updated_at = ?
+      WHERE id = ?
+        AND status = 'queued'
+        AND started_at IS NULL
+        AND lease_owner IS NULL
+        AND lease_expires_at IS NULL
+        AND heartbeat_at IS NULL
+        AND cancel_requested_at IS NULL
+        AND output_json IS NULL
+        AND error_message IS NULL
+        AND finished_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM node_flow_node_runs WHERE run_id = node_flow_runs.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM node_flow_node_attempts WHERE run_id = node_flow_runs.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM automation_outbox WHERE run_id = node_flow_runs.id
+        )
+      `).run(errorMessage, now, now, runId);
+      if (result.changes === 0) {
+        return null;
+      }
+      const terminalRun = requireRecord(this.getRun(runId), "Node flow run", runId);
+      onTerminalized?.(terminalRun);
+      return terminalRun;
+    });
   }
 
   claimQueuedRun(runId: string, executorId: string, leaseDurationMs: number, now = new Date()): NodeFlowRunRecord | null {

@@ -162,6 +162,8 @@ AI memory remediation entries create a `remediation` invocation record even when
 
 After a successful run, the service advances `nextRunAt` from the scheduled occurrence time. One-time entries move to `completed`; recurring entries stay `scheduled` until their count or end date/time is exhausted. Failed entries move to `failed` with `lastError` for operator visibility. Node-flow entries are durably claimed before `runFlow` is awaited so the same due occurrence is not dispatched again after a restart, then the scheduler entry is finalized from the returned node-flow run status.
 
+Recurring published flows containing exactly one GitHub issue-intake node have a bounded recovery rule. A pre-claim concurrency rejection or a run whose attempts are classified only as quota, transient, or timeout keeps the schedule active, records `lastError`, and advances directly to the first occurrence at least one hour in the future. Missed occurrences are not replayed. Each fresh occurrence still has the publication's normal attempt limit, while permission failures, ordinary HTTP 403 responses, validation or credential failures, approval waits, cancellations, and unknown side-effect outcomes remain terminal. Conditional finalization ensures an operator pause or schedule edit made while a run is in flight wins the race.
+
 For sprint targets, a failure returned while the scheduler submits the normal start request moves the entry to `failed`, and `lastError` exposes that failure in the scheduled-entry list. Planning and orchestration continue asynchronously after an accepted start; later provider failures remain visible through their planning invocation or sprint run rather than rewriting the already accepted scheduler occurrence.
 
 ### Node-Flow Schedules

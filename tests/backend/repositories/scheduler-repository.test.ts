@@ -30,6 +30,21 @@ afterEach(async () => {
 });
 
 describe("SchedulerRepository", () => {
+  it("does not overwrite an operator pause while a claimed run is finishing", async () => {
+    const { dir, projectRepository, schedulerRepository } = await createRepositories();
+    const project = projectRepository.createProject({ name: "Pause wins", sourceType: "local", sourceRef: dir });
+    const entry = schedulerRepository.createEntry(project.id, {
+      targetType: "chat", scheduledFor: "2026-05-18T09:00:00.000Z",
+      recurrence: { frequency: "hourly", interval: 1, endMode: "never" }, chatTarget: { bodyMarkdown: "Check in" },
+    });
+    const claimed = schedulerRepository.claimDueOccurrence(entry.id, entry.nextRunAt!, "2026-05-18T10:00:00.000Z")!;
+    schedulerRepository.updateEntry(entry.id, { status: "paused" });
+
+    schedulerRepository.markRunDeferred(entry.id, "GitHub rate limit", entry.nextRunAt!, "2026-05-18T11:00:00.000Z", claimed.updatedAt);
+
+    expect(schedulerRepository.getEntry(entry.id)).toMatchObject({ status: "paused", runCount: 0, lastError: null });
+  });
+
   it("persists sprint scheduler entries with recurrence metadata", async () => {
     const { dir, projectRepository, schedulerRepository } = await createRepositories();
     const project = projectRepository.createProject({

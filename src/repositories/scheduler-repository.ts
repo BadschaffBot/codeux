@@ -240,17 +240,18 @@ export class SchedulerRepository {
     this.publishProjectStructureRefresh(current.projectId);
   }
 
-  markRunSucceeded(entryId: string, occurrenceIso: string, nextRunAt: string | null): SchedulerEntryRecord {
+  markRunSucceeded(entryId: string, occurrenceIso: string, nextRunAt: string | null, expectedUpdatedAt?: string): SchedulerEntryRecord {
     const current = this.requireEntry(entryId);
     const now = new Date().toISOString();
     const nextStatus: ScheduleStatus = nextRunAt ? "scheduled" : "completed";
-    this.db.prepare(`
+    const result = this.db.prepare(`
       UPDATE scheduler_entries
       SET status = ?, next_run_at = ?, last_run_at = ?, run_count = ?, last_error = NULL, updated_at = ?
       WHERE id = ?
-    `).run(nextStatus, nextRunAt, occurrenceIso, current.runCount + 1, now, entryId);
+        AND (? IS NULL OR (status = 'scheduled' AND updated_at = ?))
+    `).run(nextStatus, nextRunAt, occurrenceIso, current.runCount + 1, now, entryId, expectedUpdatedAt ?? null, expectedUpdatedAt ?? null);
     const updated = this.requireEntry(entryId);
-    this.publishProjectStructureRefresh(updated.projectId);
+    if (result.changes > 0) this.publishProjectStructureRefresh(updated.projectId);
     return updated;
   }
 
@@ -286,7 +287,7 @@ export class SchedulerRepository {
     return updated;
   }
 
-  markRunFailed(entryId: string, error: string, occurrenceIso?: string): SchedulerEntryRecord {
+  markRunFailed(entryId: string, error: string, occurrenceIso?: string, expectedUpdatedAt?: string): SchedulerEntryRecord {
     const current = this.requireEntry(entryId);
     const now = new Date().toISOString();
     const failureRunFields = occurrenceIso === undefined
@@ -295,13 +296,29 @@ export class SchedulerRepository {
     const params = occurrenceIso === undefined
       ? [error, now, entryId]
       : [error, occurrenceIso, current.runCount + 1, now, entryId];
-    this.db.prepare(`
+    const result = this.db.prepare(`
       UPDATE scheduler_entries
       SET status = 'failed', last_error = ?${failureRunFields}, updated_at = ?
       WHERE id = ?
-    `).run(...params);
+        AND (? IS NULL OR (status = 'scheduled' AND updated_at = ?))
+    `).run(...params, expectedUpdatedAt ?? null, expectedUpdatedAt ?? null);
     const updated = this.requireEntry(entryId);
-    this.publishProjectStructureRefresh(current.projectId);
+    if (result.changes > 0) this.publishProjectStructureRefresh(current.projectId);
+    return updated;
+  }
+
+  markRunDeferred(entryId: string, error: string, occurrenceIso: string, nextRunAt: string, expectedUpdatedAt: string): SchedulerEntryRecord {
+    const current = this.requireEntry(entryId);
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      UPDATE scheduler_entries
+      SET status = 'scheduled', next_run_at = ?, last_run_at = ?, run_count = ?, last_error = ?, updated_at = ?
+      WHERE id = ?
+        AND status = 'scheduled'
+        AND updated_at = ?
+    `).run(nextRunAt, occurrenceIso, current.runCount + 1, error, now, entryId, expectedUpdatedAt);
+    const updated = this.requireEntry(entryId);
+    if (result.changes > 0) this.publishProjectStructureRefresh(current.projectId);
     return updated;
   }
 
