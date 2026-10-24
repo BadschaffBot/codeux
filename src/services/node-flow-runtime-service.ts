@@ -12,7 +12,7 @@ import type { CliProviderId } from "../infrastructure/providers/cli/provider-com
 import type { ProviderRunResult } from "../infrastructure/providers/cli/provider-runner.js";
 import type { CredentialBroker } from "./credentials/credential-broker.js";
 import { NodeFlowPublicationService } from "./node-flows/node-flow-publication-service.js";
-import { NodeFlowQueueService } from "./node-flows/node-flow-queue-service.js";
+import { NodeFlowQueueService, NodeFlowQuotaExceededError } from "./node-flows/node-flow-queue-service.js";
 import { NodeFlowAttemptService } from "./node-flows/node-flow-attempt-service.js";
 import { NodeFlowLeaseService } from "./node-flows/node-flow-lease-service.js";
 import { EgressPolicyService } from "./node-flows/egress-policy-service.js";
@@ -48,6 +48,8 @@ const SECRET_KEY_PATTERN = /(api[_-]?key|authorization|cookie|password|secret|to
 const MAX_HTTP_TIMEOUT_MS = 60_000;
 const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 
+export class NodeFlowAdmissionDeferredError extends Error {}
+
 interface NodeFlowRuntimeDeps {
   nodeFlowRepository: NodeFlowRepository;
   executionRepository: ExecutionRepository;
@@ -61,6 +63,7 @@ interface NodeFlowRuntimeDeps {
   outboxService?: OutboxService;
   customNodeRuntimeService?: CustomNodeRuntimeService;
   auditService?: AutomationAuditExportService;
+  githubIssueIntake?: (input: { projectId: string; config: NodeFlowJsonObject; upstream: NodeFlowJsonObject; flowInput: NodeFlowJsonObject; signal?: AbortSignal }) => Promise<NodeFlowJsonObject>;
 }
 
 interface RuntimeContext {
@@ -107,6 +110,7 @@ export class NodeFlowRuntimeService {
         }
         return summary.output ?? {};
       },
+      ...(deps.githubIssueIntake ? { githubIssueIntake: deps.githubIssueIntake } : {}),
     });
   }
 
@@ -166,7 +170,7 @@ export class NodeFlowRuntimeService {
       startedAt: null,
     });
     this.deps.auditService?.recordSystem({ action: "automation.run.started", resourceType: "node_flow_run", resourceId: run.id, projectId, outcome: "succeeded", metadata: { flowId: flow.id, publicationId: publication.id, version: publication.version, triggerType: options.triggerType ?? "manual" } });
-    return await this.executeRun(run, publication, graph, executionOrder, input, options, "queued");
+    return await this.executeRun(run, publication, graph, executionOrder, input, options, "queued", true);
   }
 
   async resumeRun(
@@ -230,15 +234,29 @@ export class NodeFlowRuntimeService {
     input: NodeFlowJsonObject,
     options: RunNodeFlowOptions,
     claimFrom: "queued" | "approval_waiting",
+    freshAdmission = false,
   ): Promise<NodeFlowRunSummaryResponse> {
     const projectId = run.projectId;
     const flowId = run.flowId;
     const parentInvocationId = run.executionInvocationId;
     if (!parentInvocationId) throw new ValidationError(`Node flow run ${run.id} has no parent execution invocation.`);
     const executorId = options.executorId?.trim() || `node-flow-runtime:${process.pid}:${randomUUID()}`;
-    const claimedRun = claimFrom === "queued"
-      ? new NodeFlowQueueService(this.deps.nodeFlowRepository).claim(run, executorId)
-      : this.deps.nodeFlowRepository.claimApprovalWaitingRun(run.id, executorId, publication.policy.leaseDurationMs);
+    let claimedRun: NodeFlowRunRecord | null;
+    if (claimFrom === "queued") {
+      try {
+        claimedRun = new NodeFlowQueueService(this.deps.nodeFlowRepository).claim(run, executorId);
+      } catch (error) {
+        if (freshAdmission && error instanceof NodeFlowQuotaExceededError) {
+          const message = error.message || "Node flow concurrency quota is exhausted.";
+          if (this.deps.nodeFlowRepository.terminalizeUnclaimedRun(run.id, message)) {
+            throw new NodeFlowAdmissionDeferredError(message);
+          }
+        }
+        throw error;
+      }
+    } else {
+      claimedRun = this.deps.nodeFlowRepository.claimApprovalWaitingRun(run.id, executorId, publication.policy.leaseDurationMs);
+    }
     if (!claimedRun) return this.summarizeRun(run.id);
     const leaseService = new NodeFlowLeaseService(this.deps.nodeFlowRepository);
     const heartbeatTimer = setInterval(() => {

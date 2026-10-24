@@ -21,7 +21,7 @@ import type { NodeFlowRepository } from "../repositories/node-flow-repository.js
 import type { NodeFlowRunSummaryResponse } from "../contracts/node-flow-types.js";
 import { buildSchedulerOccurrences, computeNextRunAfterOccurrence } from "../domain/scheduler/schedule-time.js";
 import type { ConversationMessageMetadata, CreateDashboardConversationMessageInput } from "../contracts/connection-chat-types.js";
-import { NodeFlowAdmissionDeferredError } from "./node-flows/node-flow-queue-service.js";
+import { NodeFlowAdmissionDeferredError } from "./node-flow-runtime-service.js";
 
 const RECURRING_INTAKE_FAILURE_COOLDOWN_MS = 60 * 60_000;
 
@@ -311,9 +311,10 @@ export class SchedulerService {
       ?? (entry.nodeFlowTarget.flowVersion !== undefined
         ? { mode: "pinned" as const, version: entry.nodeFlowTarget.flowVersion }
         : { mode: "latest_published" as const });
+    if (selection.mode !== "pinned") return false;
     const publication = this.deps.nodeFlowRepository?.getPublication(
       entry.nodeFlowTarget.flowId,
-      selection.mode === "pinned" ? selection.version : undefined,
+      selection.version,
     );
     return publication?.graph.nodes.length === 1
       && publication.graph.nodes[0]?.type === "github_issue_intake"

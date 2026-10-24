@@ -722,7 +722,8 @@ describe("SchedulerService", () => {
       } });
       const entry = schedulerRepository.createEntry(project.id, {
         targetType: "node_flow", scheduledFor: "2026-05-18T09:00:00.000Z",
-        recurrence: { frequency: "hourly", interval: 1, endMode: "never" }, nodeFlowTarget: { flowId: flow.id },
+        recurrence: { frequency: "hourly", interval: 1, endMode: "never" },
+        nodeFlowTarget: { flowId: flow.id, flowVersion: 1, versionSelection: { mode: "pinned", version: 1 } },
       });
       const failedRuntime = { runFlow: vi.fn().mockResolvedValue({
         run: { status: "failed", errorMessage: "403 Forbidden: You have exceeded a secondary rate limit." },
@@ -806,7 +807,8 @@ describe("SchedulerService", () => {
     vi.setSystemTime(new Date("2026-05-18T09:00:01.000Z"));
     try {
       const entry = createEntry({
-        targetType: "node_flow", sprintTarget: undefined, nodeFlowTarget: { flowId: "flow-1" },
+        targetType: "node_flow", sprintTarget: undefined,
+        nodeFlowTarget: { flowId: "flow-1", flowVersion: 1, versionSelection: { mode: "pinned", version: 1 } },
         recurrence: normalizeRecurrenceRule({ frequency: "hourly", interval: 1, endMode: "never" }),
       });
       const repo = {
@@ -835,7 +837,8 @@ describe("SchedulerService", () => {
 
   it("keeps an ordinary 403 permanent for recurring GitHub intake", async () => {
     const entry = createEntry({
-      targetType: "node_flow", sprintTarget: undefined, nodeFlowTarget: { flowId: "flow-1" },
+      targetType: "node_flow", sprintTarget: undefined,
+      nodeFlowTarget: { flowId: "flow-1", flowVersion: 1, versionSelection: { mode: "pinned", version: 1 } },
       recurrence: normalizeRecurrenceRule({ frequency: "hourly", interval: 1, endMode: "never" }),
     });
     const repo = {
@@ -862,7 +865,8 @@ describe("SchedulerService", () => {
 
   it("does not defer when any intake attempt has an unclassified outcome", async () => {
     const entry = createEntry({
-      targetType: "node_flow", sprintTarget: undefined, nodeFlowTarget: { flowId: "flow-1" },
+      targetType: "node_flow", sprintTarget: undefined,
+      nodeFlowTarget: { flowId: "flow-1", flowVersion: 1, versionSelection: { mode: "pinned", version: 1 } },
       recurrence: normalizeRecurrenceRule({ frequency: "hourly", interval: 1, endMode: "never" }),
     });
     const repo = {
@@ -892,7 +896,8 @@ describe("SchedulerService", () => {
     vi.setSystemTime(new Date("2026-05-21T09:00:01.000Z"));
     try {
       const entry = createEntry({
-        targetType: "node_flow", sprintTarget: undefined, nodeFlowTarget: { flowId: "flow-1" },
+        targetType: "node_flow", sprintTarget: undefined,
+        nodeFlowTarget: { flowId: "flow-1", flowVersion: 1, versionSelection: { mode: "pinned", version: 1 } },
         recurrence: normalizeRecurrenceRule({ frequency: "hourly", interval: 1, endMode: "after_count", count: 2 }),
       });
       const repo = {
