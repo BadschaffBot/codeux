@@ -16,11 +16,12 @@ import type { ChatThreadRuntimeService } from "./chat-thread-runtime-service.js"
 import type { ExecutionControlService } from "./execution-control-service.js";
 import type { MemoryRemediationService } from "./memory-remediation-service.js";
 import type { TaskRerunService } from "./task-rerun-service.js";
-import { NodeFlowAdmissionDeferredError, type NodeFlowRuntimeService } from "./node-flow-runtime-service.js";
+import type { NodeFlowRuntimeService } from "./node-flow-runtime-service.js";
 import type { NodeFlowRepository } from "../repositories/node-flow-repository.js";
 import type { NodeFlowRunSummaryResponse } from "../contracts/node-flow-types.js";
 import { buildSchedulerOccurrences, computeNextRunAfterOccurrence } from "../domain/scheduler/schedule-time.js";
 import type { ConversationMessageMetadata, CreateDashboardConversationMessageInput } from "../contracts/connection-chat-types.js";
+import { NodeFlowAdmissionDeferredError } from "./node-flows/node-flow-queue-service.js";
 
 const RECURRING_INTAKE_FAILURE_COOLDOWN_MS = 60 * 60_000;
 

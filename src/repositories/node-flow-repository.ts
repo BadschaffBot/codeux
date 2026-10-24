@@ -425,7 +425,6 @@ export class NodeFlowRepository {
   terminalizeUnclaimedRun(
     runId: string,
     errorMessage: string,
-    onTerminalized?: (run: NodeFlowRunRecord) => void,
   ): NodeFlowRunRecord | null {
     return this.db.transaction(() => {
       const now = new Date().toISOString();
@@ -442,6 +441,11 @@ export class NodeFlowRepository {
         AND output_json IS NULL
         AND error_message IS NULL
         AND finished_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM execution_invocations
+          WHERE id = node_flow_runs.execution_invocation_id
+            AND status = 'running'
+        )
         AND NOT EXISTS (
           SELECT 1 FROM node_flow_node_runs WHERE run_id = node_flow_runs.id
         )
@@ -456,7 +460,15 @@ export class NodeFlowRepository {
         return null;
       }
       const terminalRun = requireRecord(this.getRun(runId), "Node flow run", runId);
-      onTerminalized?.(terminalRun);
+      const parentResult = this.db.prepare(`
+        UPDATE execution_invocations
+        SET status = 'failed', error_message = ?, finished_at = ?, updated_at = ?
+        WHERE id = ?
+          AND status = 'running'
+      `).run(errorMessage, now, now, terminalRun.executionInvocationId);
+      if (parentResult.changes !== 1) {
+        throw new Error(`Node flow run ${runId} parent invocation could not be terminalized atomically.`);
+      }
       return terminalRun;
     });
   }

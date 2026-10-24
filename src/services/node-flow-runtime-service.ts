@@ -12,7 +12,7 @@ import type { CliProviderId } from "../infrastructure/providers/cli/provider-com
 import type { ProviderRunResult } from "../infrastructure/providers/cli/provider-runner.js";
 import type { CredentialBroker } from "./credentials/credential-broker.js";
 import { NodeFlowPublicationService } from "./node-flows/node-flow-publication-service.js";
-import { NodeFlowQueueService, NodeFlowQuotaExceededError } from "./node-flows/node-flow-queue-service.js";
+import { NodeFlowQueueService } from "./node-flows/node-flow-queue-service.js";
 import { NodeFlowAttemptService } from "./node-flows/node-flow-attempt-service.js";
 import { NodeFlowLeaseService } from "./node-flows/node-flow-lease-service.js";
 import { EgressPolicyService } from "./node-flows/egress-policy-service.js";
@@ -166,31 +166,7 @@ export class NodeFlowRuntimeService {
       startedAt: null,
     });
     this.deps.auditService?.recordSystem({ action: "automation.run.started", resourceType: "node_flow_run", resourceId: run.id, projectId, outcome: "succeeded", metadata: { flowId: flow.id, publicationId: publication.id, version: publication.version, triggerType: options.triggerType ?? "manual" } });
-    try {
-      return await this.executeRun(run, publication, graph, executionOrder, input, options, "queued");
-    } catch (error) {
-      if (!(error instanceof NodeFlowQuotaExceededError)) {
-        throw error;
-      }
-      const message = error.message || "Node flow concurrency quota is exhausted.";
-      const terminalRun = this.deps.nodeFlowRepository.terminalizeUnclaimedRun(run.id, message, (terminalized) => {
-        const finishedAt = terminalized.finishedAt ?? new Date().toISOString();
-        this.deps.executionRepository.updateExecutionInvocation(parentInvocation.id, {
-          status: "failed",
-          errorMessage: message,
-          finishedAt,
-        });
-        this.deps.executionRepository.appendExecutionInvocationMessage(parentInvocation.id, {
-          role: "system",
-          contentMarkdown: `Node flow run deferred before admission: ${message}`,
-          metadata: { flowId, runId: run.id, status: "failed", admissionRejected: true },
-        });
-      });
-      if (!terminalRun) {
-        throw error;
-      }
-      throw new NodeFlowAdmissionDeferredError(message);
-    }
+    return await this.executeRun(run, publication, graph, executionOrder, input, options, "queued");
   }
 
   async resumeRun(
@@ -1226,8 +1202,6 @@ export class NodeFlowRuntimeService {
     });
   }
 }
-
-export class NodeFlowAdmissionDeferredError extends Error {}
 
 function readNodeConfig(node: NodeFlowNode): NodeFlowJsonObject {
   const defaults = Object.fromEntries(
