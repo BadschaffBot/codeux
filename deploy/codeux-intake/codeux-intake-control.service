@@ -1,0 +1,17 @@
+[Unit]
+Description=Code UX bounded issue intake and health guard (CW-1069)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/models-fast/lmqr/codeux-intake-control-20261024
+Environment=PATH=/home/badschaff/.local/bin:/usr/bin:/bin
+Environment=CODEX_SESSION_ID=01a1707e-7675-7cd2-984d-2b2e030f6ab3
+Environment="CODEUX_DISPATCH_ORIGIN=James chat 2026-10-24 CW-1069"
+ExecStart=/usr/bin/python3 /models-fast/lmqr/codeux-intake-control-20261024/control.py health --apply
+ExecStart=/usr/bin/python3 /models-fast/lmqr/codeux-intake-control-20261024/control.py startup
+ExecStart=/usr/bin/python3 /models-fast/lmqr/codeux-intake-control-20261024/control.py label --manifest /models-fast/lmqr/codeux-intake-control-20261024/reviewed.json --apply
+Nice=10
+CPUQuota=50%
+TimeoutStartSec=10min
+UMask=0077

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Code UX intake and health every 15 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+Unit=codeux-intake-control.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
