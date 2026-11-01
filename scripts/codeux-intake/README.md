@@ -120,3 +120,13 @@ ruff format --check control.py test_control.py
 ruff check control.py test_control.py
 mypy control.py
 ```
+
+### Recurring health timer
+
+The user timer uses a persistent calendar trigger every quarter hour. This
+keeps a future trigger after reboot and after an unhealthy check exits nonzero.
+A failed health service is an alert, not a reason to stop subsequent checks.
+After installation, verify `systemctl --user list-timers codeux-intake-control.timer`
+shows a future NEXT value. Validate the expression with
+`systemd-analyze calendar --iterations=3 '*-*-* *:00/15:00'`.
+This timer change does not restart the coding runtime or replay provider jobs.
